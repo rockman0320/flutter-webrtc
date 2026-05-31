@@ -18,6 +18,9 @@ import android.hardware.display.DisplayManager;
 import android.util.DisplayMetrics;
 import android.hardware.display.VirtualDisplay;
 import android.media.projection.MediaProjectionManager;
+import android.os.Looper;
+import android.os.Handler;
+import android.os.Build;
 import android.view.Display;
 
 /**
@@ -46,6 +49,29 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
     private WindowManager windowManager;
     private boolean isPortrait;
 
+    // 1 FPS heartbeat: 정적 화면에서 VirtualDisplay 프레임 유지
+    private final Handler heartbeatHandler = new Handler(Looper.getMainLooper());
+    private VideoFrame.I420Buffer heartbeatI420 = null;
+    private final Runnable heartbeatRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (isDisposed || capturerObserver == null) return;
+            final VideoFrame.I420Buffer i420;
+            synchronized (OrientationAwareScreenCapturer.this) {
+                i420 = heartbeatI420;
+                if (i420 != null) i420.retain();
+            }
+            if (i420 != null) {
+                final VideoFrame heartbeatFrame = new VideoFrame(i420, 0, System.nanoTime());
+                capturerObserver.onFrameCaptured(heartbeatFrame);
+                // heartbeatFrame.release()이 내부에서 i420.release()를 호출하므로
+                // 별도로 i420.release()를 호출하면 double-release → refcount < 1 → CRASH
+                heartbeatFrame.release();
+            }
+            heartbeatHandler.postDelayed(this, 1000L);
+        }
+    };
+
     /**
      * Constructs a new Screen Capturer.
      *
@@ -70,6 +96,11 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
             changeCaptureFormat(min, max, 15);
         } else {
             changeCaptureFormat(max, min, 15);
+        }
+        // heartbeat용 I420 캐시 갱신 (실제 프레임 도착 시마다)
+        synchronized (this) {
+            if (heartbeatI420 != null) heartbeatI420.release();
+            heartbeatI420 = frame.getBuffer().toI420();
         }
         capturerObserver.onFrameCaptured(frame);
     }
@@ -120,6 +151,7 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
             this.height = width;
             this.width = height;
         }
+
         this.oldWidth = this.width;
         this.oldHeight = this.height;
 
@@ -132,11 +164,16 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
         createVirtualDisplay();
         capturerObserver.onCapturerStarted(true);
         surfaceTextureHelper.startListening(this);
+        heartbeatHandler.postDelayed(heartbeatRunnable, 1000L);
     }
 
     @Override
     public synchronized void stopCapture() {
         checkNotDisposed();
+        heartbeatHandler.removeCallbacks(heartbeatRunnable);
+        synchronized (this) {
+            if (heartbeatI420 != null) { heartbeatI420.release(); heartbeatI420 = null; }
+        }
         ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
             @Override
             public void run() {
@@ -161,6 +198,10 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
     @Override
     public synchronized void dispose() {
         isDisposed = true;
+        heartbeatHandler.removeCallbacks(heartbeatRunnable);
+        synchronized (this) {
+            if (heartbeatI420 != null) { heartbeatI420.release(); heartbeatI420 = null; }
+        }
     }
 
     /**
@@ -181,46 +222,58 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
             this.oldWidth = width;
             this.oldHeight = height;
 
-            ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
-                @Override
-                public void run() {
-                    if (surfaceTextureHelper == null || mediaProjection == null) {
-                        return;
+            if (height > width) {
+                // Portrait: STH 스레드에서 즉시 resize
+                ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
+                    @Override
+                    public void run() {
+                        if (virtualDisplay != null && surfaceTextureHelper != null) {
+                            surfaceTextureHelper.setTextureSize(width, height);
+                            releaseVirtualDisplaySurface();
+                            virtualDisplaySurface = new Surface(surfaceTextureHelper.getSurfaceTexture());
+                            virtualDisplay.setSurface(virtualDisplaySurface);
+                            virtualDisplay.resize(width, height, VIRTUAL_DISPLAY_DPI);
+                        }
                     }
-
-                    if (virtualDisplay != null) {
-                        resizeVirtualDisplay();
-                    } else {
-                        createVirtualDisplay();
+                });
+            } else {
+                // Landscape: setTextureSize 먼저, resize는 700ms 후
+                ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
+                    @Override
+                    public void run() {
+                        if (virtualDisplay != null && surfaceTextureHelper != null) {
+                            surfaceTextureHelper.setTextureSize(width, height);
+                            releaseVirtualDisplaySurface();
+                            virtualDisplaySurface = new Surface(surfaceTextureHelper.getSurfaceTexture());
+                            virtualDisplay.setSurface(virtualDisplaySurface);
+                        }
                     }
-                }
-            });
+                });
+                heartbeatHandler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
+                            @Override
+                            public void run() {
+                                if (virtualDisplay != null) {
+                                    virtualDisplay.resize(width, height, VIRTUAL_DISPLAY_DPI);
+                                }
+                            }
+                        });
+                    }
+                }, 700);
+            }
         }
     }
 
     private void createVirtualDisplay() {
-        updateSurfaceTextureSize();
+        surfaceTextureHelper.setTextureSize(width, height);
+        surfaceTextureHelper.getSurfaceTexture().setDefaultBufferSize(width, height);
         releaseVirtualDisplaySurface();
         virtualDisplaySurface = new Surface(surfaceTextureHelper.getSurfaceTexture());
         virtualDisplay = mediaProjection.createVirtualDisplay("WebRTC_ScreenCapture", width, height,
-                VIRTUAL_DISPLAY_DPI, DISPLAY_FLAGS, virtualDisplaySurface,
-                null /* callback */, null /* callback handler */);
-    }
-
-    private void resizeVirtualDisplay() {
-        updateSurfaceTextureSize();
-        virtualDisplay.resize(width, height, VIRTUAL_DISPLAY_DPI);
-        final Surface oldSurface = virtualDisplaySurface;
-        virtualDisplaySurface = new Surface(surfaceTextureHelper.getSurfaceTexture());
-        virtualDisplay.setSurface(virtualDisplaySurface);
-        if (oldSurface != null) {
-            oldSurface.release();
-        }
-    }
-
-    private void updateSurfaceTextureSize() {
-        surfaceTextureHelper.setTextureSize(width, height);
-        surfaceTextureHelper.getSurfaceTexture().setDefaultBufferSize(width, height);
+                VIRTUAL_DISPLAY_DPI, DISPLAY_FLAGS,
+                virtualDisplaySurface, null /* callback */, null /* callback handler */);
     }
 
     private void releaseVirtualDisplaySurface() {

@@ -47,6 +47,15 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
     // FlutterWebRTCPlugin instance, so for the next instances eventSink will be == null
     public static EventChannel.EventSink eventSink;
 
+    // Suppress events during activity pause/resume to prevent native crash:
+    // audioDeviceChangeListener fires while Impeller is reinitialising its GL context on resume,
+    // causing eventSink.success() to race with the OpenGLES context recreation → SIGSEGV/SIGABRT.
+    private static volatile boolean suppressEvents = false;
+    // Tracks whether AudioSwitch was active (holding audio focus) when the activity was paused,
+    // so we can re-activate it on resume only when a WebRTC session is in progress.
+    private boolean audioSwitchWasActive = false;
+    private final android.os.Handler resumeHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+
     public FlutterWebRTCPlugin() {
         sharedSingleton = this;
     }
@@ -148,7 +157,7 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
     }
 
     public void sendEvent(Object event) {
-        if(eventSink != null) {
+        if(eventSink != null && !suppressEvents) {
             eventSink.success(event);
         }
     }
@@ -174,8 +183,35 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
 
         @Override
         public void onResume(LifecycleOwner owner) {
+            // Re-enable events after a short delay so Impeller can finish GL context recreation
+            // before audioDeviceChangeListener has a chance to post to the Flutter engine.
+            resumeHandler.removeCallbacksAndMessages(null);
+            resumeHandler.postDelayed(() -> suppressEvents = false, 300);
+            // Restart the AudioSwitch (if a session was active) so that audio routing
+            // is restored when the user comes back to the app.
+            if (audioSwitchWasActive && AudioSwitchManager.instance != null) {
+                audioSwitchWasActive = false;
+                AudioSwitchManager.instance.start();
+            }
             if (null != methodCallHandler) {
                 methodCallHandler.reStartCamera();
+            }
+        }
+
+        @Override
+        public void onPause(LifecycleOwner owner) {
+            // Stop the AudioSwitch when the activity pauses so that:
+            // (1) audio focus is abandoned — no AUDIOFOCUS_LOSS/GAIN transitions
+            //     while the app is in the background, which prevents the native
+            //     crash caused by audioDeviceChangeListener firing during Impeller
+            //     GL-context recreation on resume.
+            // (2) audio mode / volume routing is released, fixing the "stuck low
+            //     media volume" symptom that persists after a WebRTC session ends.
+            resumeHandler.removeCallbacksAndMessages(null);
+            suppressEvents = true;
+            if (AudioSwitchManager.instance != null) {
+                audioSwitchWasActive = AudioSwitchManager.instance.isSessionActive();
+                AudioSwitchManager.instance.stop();
             }
         }
 

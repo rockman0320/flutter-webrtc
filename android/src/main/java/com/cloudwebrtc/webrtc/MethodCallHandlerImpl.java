@@ -171,37 +171,18 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
 
   void dispose() {
     for (final MediaStream mediaStream : localStreams.values()) {
-      try {
-        streamDispose(mediaStream);
-      } catch (Exception e) {
-        Log.w(TAG, "dispose(): error in streamDispose", e);
-      }
-      try {
-        mediaStream.audioTracks.clear();
-        mediaStream.videoTracks.clear();
-        mediaStream.preservedVideoTracks.clear();
-        mediaStream.dispose();
-      } catch (Exception e) {
-        Log.w(TAG, "dispose(): error disposing media stream", e);
-      }
+      streamDispose(mediaStream);
+      mediaStream.dispose();
     }
     localStreams.clear();
     synchronized (localTracks) {
       for (final LocalTrack track : localTracks.values()) {
-        try {
-          track.dispose();
-        } catch (Exception e) {
-          Log.w(TAG, "dispose(): error disposing local track", e);
-        }
+        track.dispose();
       }
       localTracks.clear();
     }
     for (final PeerConnectionObserver connection : mPeerConnectionObservers.values()) {
-      try {
-        peerConnectionDispose(connection);
-      } catch (Exception e) {
-        Log.w(TAG, "dispose(): error disposing peer connection", e);
-      }
+      peerConnectionDispose(connection);
     }
     mPeerConnectionObservers.clear();
   }
@@ -250,9 +231,17 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     playbackSamplesReadyCallbackAdapter = new PlaybackSamplesReadyCallbackAdapter();
 
     if(bypassVoiceProcessing) {
+      // [remote_hub local patch] Removed `setUseStereoInput(true)` because most
+      // Android phone/emulator microphones are MONO. Forcing AudioRecord to
+      // CHANNEL_IN_STEREO causes the device to fail to open and produces the
+      // "AudioRecordingConfiguration: Couldn't find device for recording" log,
+      // resulting in zero captured audio frames. We keep stereo OUTPUT (playback
+      // works fine in stereo on most devices). The whole reason we enable
+      // bypassVoiceProcessing is to switch AudioSource to MIC so Android does
+      // NOT auto-latch into MODE_IN_COMMUNICATION (which would force volume
+      // keys to STREAM_VOICE_CALL and route playback to the quiet earpiece).
       audioDeviceModuleBuilder.setUseHardwareAcousticEchoCanceler(false)
                         .setUseHardwareNoiseSuppressor(false)
-                        .setUseStereoInput(true)
                         .setUseStereoOutput(true)
                         .setAudioSource(MediaRecorder.AudioSource.MIC);
     } else {
@@ -2152,28 +2141,18 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   public void streamDispose(final MediaStream stream) {
     List<VideoTrack> videoTracks = stream.videoTracks;
     for (VideoTrack track : videoTracks) {
-      try {
-        String trackId = track.id();
-        synchronized (localTracks) {
-          localTracks.remove(trackId);
-        }
-        getUserMediaImpl.removeVideoCapturer(trackId);
-        stream.removeTrack(track);
-      } catch (IllegalStateException e) {
-        Log.d(TAG, "streamDispose(): video track already disposed, skipping");
+      synchronized (localTracks) {
+        localTracks.remove(track.id());
       }
+      getUserMediaImpl.removeVideoCapturer(track.id());
+      stream.removeTrack(track);
     }
     List<AudioTrack> audioTracks = stream.audioTracks;
     for (AudioTrack track : audioTracks) {
-      try {
-        String trackId = track.id();
-        synchronized (localTracks) {
-          localTracks.remove(trackId);
-        }
-        stream.removeTrack(track);
-      } catch (IllegalStateException e) {
-        Log.d(TAG, "streamDispose(): audio track already disposed, skipping");
+      synchronized (localTracks) {
+        localTracks.remove(track.id());
       }
+      stream.removeTrack(track);
     }
   }
 
