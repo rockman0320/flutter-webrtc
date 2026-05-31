@@ -495,15 +495,15 @@ public class GetUserMediaImpl {
                                 resultError("screenRequestPermissions", "User didn't give permission to capture the screen.", result);
                                 return;
                             }
-                            getDisplayMedia(result, mediaStream, mediaProjectionData);
+                            getDisplayMedia(constraints, result, mediaStream, mediaProjectionData);
                         }
                     });
         } else {
-            getDisplayMedia(result, mediaStream, mediaProjectionData);
+            getDisplayMedia(constraints, result, mediaStream, mediaProjectionData);
         }
     }
 
-    private void getDisplayMedia(final Result result, final MediaStream mediaStream, final Intent mediaProjectionData) {
+    private void getDisplayMedia(final ConstraintsMap constraints, final Result result, final MediaStream mediaStream, final Intent mediaProjectionData) {
         /* Create ScreenCapture */
         VideoTrack displayTrack = null;
         VideoCapturer videoCapturer = null;
@@ -540,10 +540,18 @@ public class GetUserMediaImpl {
         Point size = new Point();
         display.getRealSize(size);
 
+        ConstraintsMap videoConstraintsMap = null;
+        if (constraints != null && constraints.getType("video") == ObjectType.Map) {
+            videoConstraintsMap = constraints.getMap("video");
+        }
+        Integer reqWidth = getConstrainInt(videoConstraintsMap, "width");
+        Integer reqHeight = getConstrainInt(videoConstraintsMap, "height");
+        Integer reqFps = getConstrainInt(videoConstraintsMap, "frameRate");
+
         VideoCapturerInfoEx info = new VideoCapturerInfoEx();
-        info.width = size.x;
-        info.height = size.y;
-        info.fps = DEFAULT_FPS;
+        info.width = reqWidth != null ? reqWidth : size.x;
+        info.height = reqHeight != null ? reqHeight : size.y;
+        info.fps = reqFps != null ? reqFps : DEFAULT_FPS;
         info.isScreenCapture = true;
         info.capturer = videoCapturer;
 

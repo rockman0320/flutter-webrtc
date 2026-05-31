@@ -47,6 +47,10 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
     // FlutterWebRTCPlugin instance, so for the next instances eventSink will be == null
     public static EventChannel.EventSink eventSink;
 
+    private static volatile boolean suppressEvents = false;
+    private boolean audioSwitchWasActive = false;
+    private final android.os.Handler resumeHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+
     public FlutterWebRTCPlugin() {
         sharedSingleton = this;
     }
@@ -148,7 +152,7 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
     }
 
     public void sendEvent(Object event) {
-        if(eventSink != null) {
+        if(eventSink != null && !suppressEvents) {
             eventSink.success(event);
         }
     }
@@ -174,8 +178,24 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
 
         @Override
         public void onResume(LifecycleOwner owner) {
+            resumeHandler.removeCallbacksAndMessages(null);
+            resumeHandler.postDelayed(() -> suppressEvents = false, 300);
+            if (audioSwitchWasActive && AudioSwitchManager.instance != null) {
+                audioSwitchWasActive = false;
+                AudioSwitchManager.instance.start();
+            }
             if (null != methodCallHandler) {
                 methodCallHandler.reStartCamera();
+            }
+        }
+
+        @Override
+        public void onPause(LifecycleOwner owner) {
+            resumeHandler.removeCallbacksAndMessages(null);
+            suppressEvents = true;
+            if (AudioSwitchManager.instance != null) {
+                audioSwitchWasActive = AudioSwitchManager.instance.isSessionActive();
+                AudioSwitchManager.instance.stop();
             }
         }
 

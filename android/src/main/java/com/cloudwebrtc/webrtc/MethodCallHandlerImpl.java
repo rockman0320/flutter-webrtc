@@ -252,7 +252,6 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     if(bypassVoiceProcessing) {
       audioDeviceModuleBuilder.setUseHardwareAcousticEchoCanceler(false)
                         .setUseHardwareNoiseSuppressor(false)
-                        .setUseStereoInput(true)
                         .setUseStereoOutput(true)
                         .setAudioSource(MediaRecorder.AudioSource.MIC);
     } else {

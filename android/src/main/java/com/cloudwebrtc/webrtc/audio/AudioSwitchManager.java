@@ -155,6 +155,10 @@ public class AudioSwitchManager {
         }
     }
 
+    public boolean isSessionActive() {
+        return isActive;
+    }
+
     public void start() {
         if (audioSwitch != null) {
             handler.removeCallbacksAndMessages(null);
