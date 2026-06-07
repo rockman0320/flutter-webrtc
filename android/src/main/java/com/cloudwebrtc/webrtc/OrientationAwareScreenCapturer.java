@@ -174,11 +174,18 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
         synchronized (this) {
             if (heartbeatI420 != null) { heartbeatI420.release(); heartbeatI420 = null; }
         }
-        ThreadUtils.invokeAtFrontUninterruptibly(surfaceTextureHelper.getHandler(), new Runnable() {
+        // Run release operations on the SurfaceTextureHelper thread without blocking
+        // the caller thread to avoid potential deadlocks / ANRs. If posting fails,
+        // fall back to the original synchronous invoke to remain safe.
+        final Runnable releaseRunnable = new Runnable() {
             @Override
             public void run() {
-                surfaceTextureHelper.stopListening();
-                capturerObserver.onCapturerStopped();
+                if (surfaceTextureHelper != null) {
+                    surfaceTextureHelper.stopListening();
+                }
+                if (capturerObserver != null) {
+                    capturerObserver.onCapturerStopped();
+                }
                 if (virtualDisplay != null) {
                     virtualDisplay.release();
                     virtualDisplay = null;
@@ -187,12 +194,43 @@ public class OrientationAwareScreenCapturer implements VideoCapturer, VideoSink 
                 if (mediaProjection != null) {
                     // Unregister the callback before stopping, otherwise the callback recursively
                     // calls this method.
-                    mediaProjection.unregisterCallback(mediaProjectionCallback);
-                    mediaProjection.stop();
+                    try {
+                        mediaProjection.unregisterCallback(mediaProjectionCallback);
+                    } catch (Exception ignored) {
+                    }
+                    try {
+                        mediaProjection.stop();
+                    } catch (Exception ignored) {
+                    }
                     mediaProjection = null;
                 }
             }
-        });
+        };
+
+        android.os.Handler handler = null;
+        try {
+            if (surfaceTextureHelper != null) handler = surfaceTextureHelper.getHandler();
+        } catch (Exception ignored) {
+        }
+
+        boolean posted = false;
+        if (handler != null) {
+            try {
+                posted = handler.post(releaseRunnable);
+            } catch (Exception ignored) {
+                posted = false;
+            }
+        }
+
+        if (!posted) {
+            // If posting to the handler failed, fall back to synchronous invoke
+            if (handler != null) {
+                ThreadUtils.invokeAtFrontUninterruptibly(handler, releaseRunnable);
+            } else {
+                // No handler available — run inline as last resort
+                releaseRunnable.run();
+            }
+        }
     }
 
     @Override
